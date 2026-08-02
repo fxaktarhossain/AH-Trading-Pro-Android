@@ -1,0 +1,120 @@
+name: Build AH Trading Pro APK V3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '*.zip'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show repository files
+        shell: bash
+        run: |
+          echo "Repository root: $GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -printf '%P\n' | sort
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Find and extract Android source ZIP
+        id: extract
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          workspace = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          zip_files = sorted(
+              [p for p in workspace.glob('*.zip') if p.is_file()],
+              key=lambda p: p.stat().st_size,
+              reverse=True,
+          )
+
+          if not zip_files:
+              print('ERROR: No ZIP file exists in the repository root.')
+              print('Root files:')
+              for p in sorted(workspace.iterdir()):
+                  print(' -', p.name)
+              sys.exit(1)
+
+          source_zip = zip_files[0]
+          print(f'Using ZIP: {source_zip.name} ({source_zip.stat().st_size} bytes)')
+
+          if not zipfile.is_zipfile(source_zip):
+              print(f'ERROR: {source_zip.name} is not a valid ZIP archive.')
+              sys.exit(1)
+
+          extract_dir = workspace / 'extracted_android_source'
+          if extract_dir.exists():
+              import shutil
+              shutil.rmtree(extract_dir)
+          extract_dir.mkdir(parents=True)
+
+          with zipfile.ZipFile(source_zip) as archive:
+              archive.extractall(extract_dir)
+
+          settings_files = list(extract_dir.rglob('settings.gradle')) + list(extract_dir.rglob('settings.gradle.kts'))
+          if not settings_files:
+              print('ERROR: No settings.gradle or settings.gradle.kts found after extraction.')
+              for p in sorted(extract_dir.rglob('*')):
+                  if p.is_file():
+                      print(' -', p.relative_to(extract_dir))
+              sys.exit(1)
+
+          project_dir = settings_files[0].parent.resolve()
+          print(f'Android project directory: {project_dir}')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'project_dir={project_dir}\n')
+          PY
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: ${{ steps.extract.outputs.project_dir }}
+        run: gradle assembleDebug --stacktrace
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          APK_FILE="$(find "${{ steps.extract.outputs.project_dir }}" -type f -path '*/build/outputs/apk/debug/*.apk' | head -n 1)"
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: APK file was not generated."
+            exit 1
+          fi
+          echo "APK found: $APK_FILE"
+          echo "apk_file=$APK_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AH-Trading-Pro-APK-v1.4.1
+          path: ${{ steps.apk.outputs.apk_file }}
+          if-no-files-found: error
